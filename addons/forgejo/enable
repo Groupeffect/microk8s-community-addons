@@ -43,6 +43,7 @@ class Handler:
 
     def enable(self, ns, values, admin, pw, email, *args, **kwargs):
         """Install addon to kubernetes"""
+        self.create_namespace(ns=ns)
         cmd = ["/bin/sh", "-c", f"{self.mk8s_enable} hostpath-storage"]
         subprocess.check_call(cmd)
         cmd = [
@@ -58,6 +59,30 @@ class Handler:
         ]
         subprocess.check_call(cmd)
 
+    def istio(self,ns, values, admin, pw, email, *args, **kwargs):
+        self.create_namespace(ns=ns)
+
+        cmd = [
+            "/bin/sh",
+            "-c",
+            f"""{self.KUBECTL} label namespace {ns} istio-system=enabled"""
+        ]
+        subprocess.check_call(cmd)
+        cmd = [
+            "/bin/sh",
+            "-c",
+            f"""{self.KUBECTL} apply -n istio-system -f {self.BASE_DIR}/gateway.yaml"""
+        ]
+        subprocess.check_call(cmd)
+        cmd = [
+            "/bin/sh",
+            "-c",
+            f"""cp {H.BASE_DIR}/istio.yaml {H.helmfolder}/templates/gitea"""
+        ]
+        subprocess.check_call(cmd)
+        self.enable(ns, values, admin, pw, email)
+
+        
 
 H = Handler()
 
@@ -87,7 +112,8 @@ H = Handler()
     is_flag=True,
     help=f"pull helm if not exists in {H.helmfolder}",
 )
-def main(ns, admin, email, pw, values, repo, update):
+@click.option("--istio", is_flag=True, default=False, help=f"enable istio sidecar injection and gateway")
+def main(ns, admin, email, pw, values, repo, update,istio):
     """CLI options available"""
 
     click.echo(f"#### Forgejo parameter:")
@@ -98,6 +124,7 @@ def main(ns, admin, email, pw, values, repo, update):
     click.echo(f"--values {values}")
     click.echo(f"--repo {repo}")
     click.echo(f"--update {update}")
+    click.echo(f"--istio {istio}")
     click.echo("#### enabling forgejo addon")
 
     if update:
@@ -106,9 +133,11 @@ def main(ns, admin, email, pw, values, repo, update):
     elif not os.path.exists(os.path.join(H.helmfolder, "values.yaml")):
         H.pull(repo)
 
-    H.create_namespace(ns)
-    H.enable(repo=repo, ns=ns, values=values, admin=admin, pw=pw, email=email)
 
+    if istio:
+        H.istio(repo=repo, ns=ns, values=values, admin=admin, pw=pw, email=email)
+    else:
+        H.enable(repo=repo, ns=ns, values=values, admin=admin, pw=pw, email=email)
 
 if __name__ == "__main__":
     main()

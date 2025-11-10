@@ -10,22 +10,32 @@ class Handler:
 
     def disable(self, ns, *args, **kwargs):
         """Remove addon from kubernetes"""
+
         cmd = [
             "/bin/sh",
             "-c",
             f"{self.KUBECTL} get all -n {ns} -o yaml | {self.KUBECTL} delete -f -",
         ]
-        subprocess.check_call(cmd)
+        try:
+            subprocess.check_call(cmd)
+        except Exception as e:
+            click.echo(e)
+            
         cmd = ["/bin/sh", "-c", f"{self.KUBECTL} delete namespace {ns}"]
-        subprocess.check_call(cmd)
+        try:
+            subprocess.check_call(cmd)
+        except Exception as e:
+            click.echo(e)
 
 
 @click.command()
-@click.option("--ns", default="forgejo", help="delete custom kubernetes namespace")
+@click.option("--ns", default="groupeffect", help="delete custom kubernetes namespace")
 def main(ns):
-    click.echo(f"Disabling Forgejo in namespace {ns}")
+    click.echo(f"Disabling groupeffect in namespace {ns}")
     H = Handler()
+    H.disable(ns="runner")
     H.disable(ns=ns)
+    H.disable(ns="forgejo")
 
 
 if __name__ == "__main__":

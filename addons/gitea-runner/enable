@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+import click
+import os
+import subprocess
+from pathlib import Path
+
+
+class Handler:
+    def __init__(self):
+        """Forgejo HELM REPO: https://dl.gitea.com/charts/"""
+
+        self.REPOSITORY = "https://dl.gitea.com/charts/"
+        self.BASE_DIR = Path(__file__).parent
+        self.HELM = os.path.expandvars("$SNAP/microk8s-helm3.wrapper")
+        self.KUBECTL = os.path.expandvars("$SNAP/microk8s-kubectl.wrapper")
+        self.mk8s_enable = os.path.expandvars("$SNAP/microk8s-enable.wrapper")
+        self.mk8s_disable = os.path.expandvars("$SNAP/microk8s-disable.wrapper")
+        self.giteaRootURL = "http://forgejo-http.forgejo.svc.cluster.local:3000"
+
+    def create_namespace(self, ns):
+        try:
+            subprocess.check_call([self.KUBECTL, "create", "namespace", ns])
+        except Exception as e:
+            click.echo(e)
+
+    def pull(self, *args, **kwargs):
+        cmd = [
+            "/bin/sh",
+            "-c",
+            f"""{self.HELM} repo add gitea-charts {self.REPOSITORY}""",
+        ]
+        subprocess.check_call(cmd)
+        cmd = ["/bin/sh", "-c", f"""{self.HELM} repo update"""]
+        subprocess.check_call(cmd)
+
+    def enable(self, ns, values, secret, url,*args, **kwargs):
+        """Install addon to kubernetes"""
+        self.create_namespace(ns=ns)
+        self.pull()
+        cmd = [
+            "/bin/sh",
+            "-c",
+            f"""{self.HELM} upgrade --install gitea-runner gitea-charts/actions \\
+                -f {values} \\
+                --namespace {ns} \\
+                --set giteaRootURL={url} \\
+                --set existingSecret={secret}
+            """,
+        ]
+        subprocess.check_call(cmd)
+
+
+H = Handler()
+
+
+@click.command()
+@click.option(
+    "--ns", default="runner", help="set / create custom kubernetes namespace"
+)
+@click.option("--secret", default="forgejo-runner", help=f"secret for GITEA_RUNNER_REGISTRATION_TOKEN")
+
+@click.option("--url", default=f"{H.giteaRootURL}", help="GITEA_INSTANCE_URL")
+@click.option(
+    "--values",
+    default=H.BASE_DIR / "values-mk8s.yaml",
+    type=str,
+    help="provide one values file path or url",
+)
+@click.option(
+    "--repo",
+    default=H.REPOSITORY,
+    type=str,
+    help="provide custom helm repo path, use it with --update to pull from repository",
+)
+def main(ns, secret, url, values, repo):
+    """CLI options available"""
+
+    click.echo(f"#### Forgejo parameter:")
+    click.echo(f"--ns {ns}")
+    click.echo(f"--secret {secret}")
+    click.echo(f"--values {values}")
+    click.echo(f"--repo {repo}")
+    click.echo(f"--url {url}")
+    click.echo("#### enabling forgejo addon")
+
+    H.pull(repo)
+    H.enable(
+        ns=ns,
+        values=values,
+        secret=secret,
+        url=url
+    )
+
+    # H.enable(repo=repo, ns=ns, values=values, admin=admin, pw=pw, email=email)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+import click
+import os
+import subprocess
+from pathlib import Path
+import shutil
+import time
+
+class Handler:
+
+    def __init__(self):
+
+        self.addons = [
+            {"name":"metallb"},
+            {"name":"istio"},
+            {"name":"forgejo"},
+            {"name":"forgejo_runner"},
+            {"name":"postgresql"},
+            {"name":"groupeffect"},
+        ]
+        
+        self.BASE_DIR = Path(__file__).parent
+        self.HELM = os.path.expandvars("$SNAP/microk8s-helm3.wrapper")
+        self.KUBECTL = os.path.expandvars("$SNAP/microk8s-kubectl.wrapper")
+        self.mk8s_enable = os.path.expandvars("$SNAP/microk8s-enable.wrapper")
+        self.mk8s_disable = os.path.expandvars("$SNAP/microk8s-disable.wrapper")
+        self.untarpath = os.path.join("/tmp/helm")
+        self.helmfolder = os.path.join(self.untarpath, "groupeffect")
+
+    def create_namespace(self, ns):
+        try:
+            subprocess.check_call([self.KUBECTL, "create", "namespace", ns])
+        except Exception as e:
+            click.echo(e)
+
+    def get_range_for_metallb(self,*args,**kwargs):
+        cmd = ["/bin/sh", "-c", f"hostname -I | awk '{{print $1}}'"]
+        IP = subprocess.check_output(cmd).decode(encoding="utf-8")
+        range_start = IP.replace(IP.split('.')[-1],'200')
+        range_end = IP.replace(IP.split('.')[-1],'220')
+        metallb_range=f"{range_start}-{range_end}"
+        return metallb_range
+    
+    def get_addresspool_from_metallb(self):
+        scmd = f"{self.KUBECTL} get -n metallb-system ipaddresspools.metallb.io -o json | jq -r '.items[].metadata.name'"
+        cmd = ["/bin/sh", "-c", scmd]
+        return subprocess.check_output(cmd).decode(encoding="utf-8").replace("\n","")
+    
+    def patch_svc_loadbalancer_for_metallb(self,ns,svc):
+        XPATCH='{"metadata":{"annotations":{"metallb.universe.tf/address-pool":"'+ self.get_addresspool_from_metallb() +'"}}}'
+        YPATCH='{"spec":{"type":"LoadBalancer"}}'
+        cmd = ["/bin/sh", "-c", f"{self.KUBECTL} patch service/{svc} -n {ns} -p '{XPATCH}'"]
+        subprocess.check_call(cmd)
+        
+        cmd = ["/bin/sh", "-c", f"{self.KUBECTL} patch service/{svc} -n {ns} -p '{YPATCH}'"]
+        subprocess.check_call(cmd)
+    
+    def generate_forgejo_runner_token(self):
+        podcmd = f"{self.KUBECTL} get pod -n forgejo -o name"
+        pod = subprocess.check_output(["/bin/sh","-c",podcmd]).decode(encoding="utf-8").replace("\n","")
+
+        fgcli="forgejo forgejo-cli actions generate-runner-token"
+        # kubectl exec -n forgejo -it forgejo-6d6c7ccdd-bbzqr -- sh
+        cmd = ["/bin/sh", "-c",f"""{self.KUBECTL} exec -n forgejo -it {pod} -- /bin/sh -c '{fgcli}'"""]
+        token = subprocess.check_output(cmd).decode(encoding="utf-8").replace("\n","")
+        click.echo("forgejo runner token:")
+        click.echo(token)
+        return token
+        
+    
+    def enable(self, ns=None, values=None, admin=None, pw=None, email=None,token=None, *args, **kwargs):
+        """Install addon to kubernetes"""
+        # self.create_namespace(ns=ns)
+
+
+        cmd = ["/bin/sh", "-c", f"{self.mk8s_enable} dns"]
+        subprocess.check_call(cmd)
+
+        cmd = ["/bin/sh", "-c", f"{self.mk8s_enable} registry"]
+        subprocess.check_call(cmd)
+
+        cmd = ["/bin/sh", "-c", f"{self.mk8s_enable} metallb:{self.get_range_for_metallb()}"]
+        subprocess.check_call(cmd)
+
+        cmd = ["/bin/sh", "-c", f"{self.mk8s_enable} forgejo --admin {admin} --email {email}"]
+        subprocess.check_call(cmd)
+
+        secret_name="groupeffect-init"
+        cmd = ["/bin/sh","-c",f"""{self.KUBECTL} create secret generic {secret_name} --from-literal=admin={pw} -n {ns}"""]
+        try:
+            subprocess.check_call(cmd)
+        except Exception as e:
+            click.echo(e)
+
+        # action runner setup
+        try:
+
+            if token is None:
+                token = self.generate_forgejo_runner_token()
+            self.patch_svc_loadbalancer_for_metallb("forgejo","forgejo-http")
+
+            # create secret for runner token
+            secret_name="forgejo-runner"
+            cmd = ["/bin/sh","-c",f"""{self.KUBECTL} create secret generic {secret_name} --from-literal=token={token} -n runner"""]
+            try:
+                subprocess.check_call([self.KUBECTL,"delete","secret",secret_name,"-n","runner"])
+            except Exception as e:
+                click.echo(e)
+            try:
+                subprocess.check_call(cmd)
+            except Exception as e:
+                click.echo(e)
+
+            # set secret for runner
+            cmd = ["/bin/sh", "-c", f"{self.mk8s_enable} gitea-runner --secret {secret_name}"]
+            subprocess.check_call(cmd)
+
+
+        except Exception as e:
+            click.echo(e)
+            click.echo("## Try again after dependencies running")
+            time.sleep(10)
+            self.enable( ns, values, admin, pw, email,token)
+            self.enable( ns, values, admin, pw, email,token)
+            
+            
+
+    def test(self,*args,**kwargs):
+        click.echo("### TESTING")
+        click.echo(self.get_addresspool_from_metallb())
+        click.echo("### END TESTING")
+        # self.enable()
+
+        
+
+H = Handler()
+
+
+@click.command()
+@click.option(
+    "--ns", default="groupeffect", help="set / create custom kubernetes namespace"
+)
+@click.option("--admin", default="amir", help="admin username")
+@click.option("--email", default="mail@groupeffect.de", help="admin email")
+@click.option("--pw", default="admin1234", help=f"admin password")
+@click.option(
+    "--values",
+    default=H.BASE_DIR / "values-mk8s.yaml",
+    type=str,
+    help="provide one values file path or url",
+)
+@click.option("--token", default=None, help=f"secret for GITEA_RUNNER_REGISTRATION_TOKEN")
+def main(ns, admin, email, pw, values, token):
+    """CLI options available"""
+
+    click.echo(f"#### CLI parameter:")
+    click.echo(f"--ns {ns}")
+    click.echo(f"--admin {admin}")
+    click.echo(f"--pw ...")
+    click.echo(f"--email {email}")
+    click.echo(f"--values {values}")
+    click.echo(f"--token {token}")
+    click.echo("#### enabling groupeffect addon")
+
+    # H.test()
+
+    H.enable(ns=ns, values=values, admin=admin, pw=pw, email=email,token=token)
+
+if __name__ == "__main__":
+    main()

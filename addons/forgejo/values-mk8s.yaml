@@ -1,3 +1,11 @@
 # Customize values
 test:
   enabled: false
+
+ingress:
+  hosts:
+    - host: git.mk8s.local
+      paths:
+        - path: /
+          pathType: Prefix
+          port: http
